@@ -1,0 +1,11 @@
+route:
+  receiver: eventhub-webhook
+  group_by: [alertname, service]
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 4h
+receivers:
+  - name: eventhub-webhook
+    webhook_configs:
+      - url_file: /run/secrets/webhook-url
+        send_resolved: true

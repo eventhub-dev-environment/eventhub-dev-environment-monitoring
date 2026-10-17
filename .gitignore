@@ -1,0 +1,2 @@
+.env
+secrets/alertmanager-webhook-url

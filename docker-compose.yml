@@ -1,0 +1,239 @@
+services:
+  # Base de datos NoSQL (event-service, notification-service, config-service)
+  mongodb:
+    image: mongo:7.0
+    container_name: eventhub-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASS}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eventhub-network
+
+  # Broker de Mensajes Asíncronos
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: eventhub-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASS:-guest}
+    volumes:
+      - ./rabbitmq-enabled-plugins:/etc/rabbitmq/enabled_plugins:ro
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eventhub-network
+
+  # Servidor de Trazabilidad Distribuida
+  zipkin:
+    image: openzipkin/zipkin:latest
+    container_name: eventhub-zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - eventhub-network
+
+  # Servidor de Monitoreo y Métricas
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: eventhub-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus.rules.yml:/etc/prometheus/prometheus.rules.yml:ro
+    networks:
+      - eventhub-network
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: eventhub-alertmanager
+    profiles:
+      - alerting
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./secrets/alertmanager-webhook-url:/run/secrets/webhook-url:ro
+    networks:
+      - eventhub-network
+
+  config-service:
+    build: ../eventhub-config-service
+    container_name: eventhub-config-service
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_DATA_MONGODB_URI=mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASS}@mongodb:27017/eventhub_config_db?authSource=admin
+      - MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT=${ZIPKIN_ENDPOINT}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      zipkin:
+        condition: service_started
+    networks:
+      - eventhub-network
+
+  auth-service:
+    build: ../eventhub-auth-service
+    container_name: eventhub-auth-service
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_DATASOURCE_URL=${NEON_DB_AUTH_URL}
+      - SPRING_DATASOURCE_USERNAME=${NEON_DB_USER}
+      - SPRING_DATASOURCE_PASSWORD=${NEON_DB_PASS}
+      - MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT=${ZIPKIN_ENDPOINT}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      zipkin:
+        condition: service_started
+    networks:
+      - eventhub-network
+
+  event-service:
+    build: ../eventhub-event-service
+    container_name: eventhub-event-service
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_DATA_MONGODB_URI=mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASS}@mongodb:27017/eventhub_events_db?authSource=admin
+      - MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT=${ZIPKIN_ENDPOINT}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET}
+      # Integración con AWS S3 real
+      - AWS_S3_ENDPOINT=
+      - AWS_S3_PUBLIC_URL=https://eventhub-branding-prod.s3.us-east-1.amazonaws.com
+      - AWS_S3_ACCESS_KEY=${AWS_ACCESS_KEY_ID}
+      - AWS_S3_SECRET_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_S3_BUCKET_NAME=eventhub-branding-prod
+      - AWS_S3_REGION=us-east-1
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      zipkin:
+        condition: service_started
+    networks:
+      - eventhub-network
+
+  booking-service:
+    build: ../eventhub-booking-service
+    container_name: eventhub-booking-service
+    ports:
+      - "8084:8084"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_DATASOURCE_URL=${NEON_DB_BOOKING_URL}
+      - SPRING_DATASOURCE_USERNAME=${NEON_DB_USER}
+      - SPRING_DATASOURCE_PASSWORD=${NEON_DB_PASS}
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT=${ZIPKIN_ENDPOINT}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      zipkin:
+        condition: service_started
+    networks:
+      - eventhub-network
+
+  payment-service:
+    build: ../eventhub-payment-service
+    container_name: eventhub-payment-service
+    ports:
+      - "8085:8085"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_DATASOURCE_URL=${NEON_DB_PAYMENT_URL}
+      - SPRING_DATASOURCE_USERNAME=${NEON_DB_USER}
+      - SPRING_DATASOURCE_PASSWORD=${NEON_DB_PASS}
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_USERNAME=${RABBITMQ_USER}
+      - SPRING_RABBITMQ_PASSWORD=${RABBITMQ_PASS}
+      - MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT=${ZIPKIN_ENDPOINT}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - PAYMENT_CHECKOUT_SUCCESS_URL=${PAYMENT_CHECKOUT_SUCCESS_URL}
+      - PAYMENT_CHECKOUT_CANCEL_URL=${PAYMENT_CHECKOUT_CANCEL_URL}
+      - PAYMENT_WEBHOOK_HMAC_SECRET=${PAYMENT_WEBHOOK_HMAC_SECRET}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      zipkin:
+        condition: service_started
+    networks:
+      - eventhub-network
+
+  notification-service:
+    build:
+      context: ../eventhub-notification-service
+      dockerfile: Dockerfile
+    container_name: eventhub-notification-service
+    ports:
+      - "8086:8086"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_DATA_MONGODB_URI=mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASS}@mongodb:27017/eventhub_notifications_db?authSource=admin
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=${RABBITMQ_USER}
+      - SPRING_RABBITMQ_PASSWORD=${RABBITMQ_PASS}
+      - SPRING_MAIL_HOST=${MAIL_HOST}
+      - SPRING_MAIL_PORT=${MAIL_PORT}
+      - SPRING_MAIL_USERNAME=${MAIL_USERNAME}
+      - SPRING_MAIL_PASSWORD=${MAIL_PASSWORD}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET}
+    depends_on:
+      - mongodb
+      - rabbitmq
+    networks:
+      - eventhub-network
+
+  api-gateway:
+    build: ../eventhub-api-gateway
+    container_name: eventhub-api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - MANAGEMENT_TRACING_EXPORT_ZIPKIN_ENDPOINT=${ZIPKIN_ENDPOINT}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      - config-service
+      - auth-service
+      - event-service
+      - booking-service
+      - payment-service
+      - notification-service
+      - zipkin
+    networks:
+      - eventhub-network
+
+networks:
+  eventhub-network:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  rabbitmq_data:
