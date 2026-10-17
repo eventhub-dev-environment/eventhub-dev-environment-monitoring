@@ -1,0 +1,29 @@
+groups:
+  - name: eventhub-reliability
+    rules:
+      - alert: RabbitMQDeadLetterQueueBacklog
+        expr: sum by (vhost, queue) (rabbitmq_detailed_queue_messages{queue=~".*\\.dlq"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: rabbitmq
+        annotations:
+          summary: RabbitMQ dead-letter queue has messages
+          description: Queue {{ $labels.queue }} in vhost {{ $labels.vhost }} has {{ $value }} message(s) for at least 5 minutes.
+      - alert: EventHubOutboxPublishFailure
+        expr: eventhub_outbox_failed_events > 0
+        labels:
+          severity: critical
+          service: "{{ $labels.service }}"
+        annotations:
+          summary: Outbox events exhausted publishing retries
+          description: The {{ $labels.service }} service has {{ $value }} failed outbox event(s) requiring recovery.
+      - alert: RabbitMQMetricsUnavailable
+        expr: up{job="rabbitmq"} == 0
+        for: 1m
+        labels:
+          severity: warning
+          service: rabbitmq
+        annotations:
+          summary: RabbitMQ metrics endpoint is unavailable
+          description: Prometheus cannot scrape RabbitMQ metrics for at least 1 minute.
